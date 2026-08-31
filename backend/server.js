@@ -3,280 +3,657 @@ const http = require("http");
 const WebSocket = require("ws");
 
 const app = express();
+
 app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
 
-// Store connected devices
-const devices = new Map();
+const wss = new WebSocket.Server({
+    server
+});
 
 
-// --------------------------------------------------
-// HOME / HEALTH CHECK
-// --------------------------------------------------
+// =====================================================
+// DEVICES
+// =====================================================
+
+const helmets = new Map();
+
+
+// =====================================================
+// GET HELMET
+// =====================================================
+
+function getHelmet(deviceId) {
+
+    if (!helmets.has(deviceId)) {
+
+        helmets.set(deviceId, {
+            raspberrypi: null,
+            nodemcu: null
+        });
+
+    }
+
+    return helmets.get(deviceId);
+}
+
+
+// =====================================================
+// HOME
+// =====================================================
 
 app.get("/", (req, res) => {
-    res.json({
+
+    res.status(200).json({
         status: "online",
         service: "Smart Helmet Server",
         time: new Date().toISOString()
     });
+
 });
+
+
+// =====================================================
+// HEALTH
+// =====================================================
 
 app.get("/health", (req, res) => {
+
     res.status(200).json({
         status: "healthy",
+        service: "smart-helmet",
         uptime: process.uptime(),
+        devices: helmets.size,
         time: new Date().toISOString()
     });
+
 });
 
 
-// --------------------------------------------------
+// =====================================================
 // SAFETY DECISION
-// --------------------------------------------------
+// =====================================================
 
 function calculateSafety(data) {
 
-    const helmetWorn = data.helmetWorn === true;
-    const alcohol = data.alcohol === true;
-    const drowsy = data.drowsy === true;
-    const cameraSafe = data.cameraSafe === true;
+    const helmetWorn =
+        data.helmetWorn === true;
 
-    // Priority 1: Helmet
+    const alcohol =
+        data.alcohol === true;
+
+    const drowsy =
+        data.drowsy === true;
+
+    const cameraSafe =
+        data.cameraSafe === true;
+
+
+    // -----------------------------------------------
+    // 1. HELMET
+    // -----------------------------------------------
+
     if (!helmetWorn) {
+
         return {
             status: "WEAR_HELMET",
             motor: false,
             buzzer: true,
             message: "WEAR HELMET"
         };
+
     }
 
-    // Priority 2: Alcohol
+
+    // -----------------------------------------------
+    // 2. ALCOHOL
+    // -----------------------------------------------
+
     if (alcohol) {
+
         return {
             status: "ALCOHOL",
             motor: false,
             buzzer: true,
             message: "ALCOHOL DETECTED"
         };
+
     }
 
-    // Priority 3: Drowsiness
+
+    // -----------------------------------------------
+    // 3. DROWSINESS
+    // -----------------------------------------------
+
     if (drowsy) {
+
         return {
             status: "DROWSY",
             motor: false,
             buzzer: true,
             message: "WAKE UP!"
         };
+
     }
 
-    // Priority 4: Camera
+
+    // -----------------------------------------------
+    // 4. CAMERA
+    // -----------------------------------------------
+
     if (!cameraSafe) {
+
         return {
             status: "CAMERA_UNSAFE",
             motor: false,
             buzzer: true,
             message: "SAFETY WARNING"
         };
+
     }
 
-    // Everything is safe
+
+    // -----------------------------------------------
+    // 5. SAFE
+    // -----------------------------------------------
+
     return {
         status: "SAFE",
         motor: true,
         buzzer: false,
         message: "HELMET OK"
     };
+
 }
 
 
-// --------------------------------------------------
-// WEBSOCKET
-// --------------------------------------------------
+// =====================================================
+// SEND COMMAND TO NODEMCU
+// =====================================================
 
-wss.on("connection", (ws) => {
+function sendMotorCommand(
+    helmetId,
+    decision
+) {
 
-    console.log("New WebSocket connection");
+    const helmet = helmets.get(helmetId);
 
-    ws.deviceType = null;
-    ws.deviceId = null;
-
-    ws.isAlive = true;
-
-    ws.on("pong", () => {
-        ws.isAlive = true;
-    });
-
-
-    ws.on("message", (message) => {
-
-        try {
-
-            const data = JSON.parse(message.toString());
-
-            console.log("Received:", data);
-
-
-            // --------------------------------------
-            // DEVICE REGISTRATION
-            // --------------------------------------
-
-            if (data.type === "register") {
-
-                ws.deviceType = data.deviceType;
-                ws.deviceId = data.deviceId;
-
-                devices.set(data.deviceId, ws);
-
-                console.log(
-                    `Registered ${data.deviceType}: ${data.deviceId}`
-                );
-
-                ws.send(JSON.stringify({
-                    type: "registered",
-                    deviceId: data.deviceId
-                }));
-
-                return;
-            }
-
-
-            // --------------------------------------
-            // PI SENDS SENSOR DATA
-            // --------------------------------------
-
-            if (data.type === "sensor_data") {
-
-                const helmetId = data.deviceId;
-
-                const node = devices.get(helmetId);
-
-                const decision = calculateSafety(data);
-
-                console.log(
-                    `Helmet ${helmetId}: ${decision.status}`
-                );
-
-
-                // Send decision to NodeMCU
-                if (node && node.readyState === WebSocket.OPEN) {
-
-                    node.send(JSON.stringify({
-                        type: "motor_command",
-                        ...decision
-                    }));
-
-                    console.log(
-                        "Command sent to NodeMCU:",
-                        decision
-                    );
-
-                } else {
-
-                    console.log(
-                        "NodeMCU not connected for:",
-                        helmetId
-                    );
-                }
-
-                return;
-            }
-
-
-            // --------------------------------------
-            // PING FROM CLIENT
-            // --------------------------------------
-
-            if (data.type === "ping") {
-
-                ws.send(JSON.stringify({
-                    type: "pong"
-                }));
-
-                return;
-            }
-
-
-            ws.send(JSON.stringify({
-                type: "error",
-                message: "Unknown message type"
-            }));
-
-        }
-
-        catch (error) {
-
-            console.error("Message error:", error);
-
-            ws.send(JSON.stringify({
-                type: "error",
-                message: "Invalid JSON"
-            }));
-        }
-
-    });
-
-
-    ws.on("close", () => {
+    if (!helmet) {
 
         console.log(
-            `Disconnected: ${ws.deviceId || "unknown"}`
+            "Helmet not registered:",
+            helmetId
         );
 
-        if (ws.deviceId) {
+        return;
 
-            // Only delete if this is the same connection
-            if (devices.get(ws.deviceId) === ws) {
-                devices.delete(ws.deviceId);
+    }
+
+
+    const node = helmet.nodemcu;
+
+
+    if (
+        node &&
+        node.readyState === WebSocket.OPEN
+    ) {
+
+        const command = {
+
+            type: "motor_command",
+
+            deviceId: helmetId,
+
+            status: decision.status,
+
+            motor: decision.motor,
+
+            buzzer: decision.buzzer,
+
+            message: decision.message
+
+        };
+
+
+        node.send(
+            JSON.stringify(command)
+        );
+
+
+        console.log(
+            "COMMAND → NODEMCU:",
+            command
+        );
+
+    }
+    else {
+
+        console.log(
+            "NodeMCU not connected:",
+            helmetId
+        );
+
+    }
+
+}
+
+
+// =====================================================
+// WEBSOCKET
+// =====================================================
+
+wss.on(
+    "connection",
+    (ws) => {
+
+        console.log(
+            "New WebSocket connection"
+        );
+
+
+        ws.deviceType = null;
+        ws.deviceId = null;
+        ws.isAlive = true;
+
+
+        // ---------------------------------------------
+        // PONG
+        // ---------------------------------------------
+
+        ws.on(
+            "pong",
+            () => {
+
+                ws.isAlive = true;
+
             }
-        }
-    });
+        );
 
 
-    ws.on("error", (error) => {
-        console.error("WebSocket error:", error);
-    });
+        // ---------------------------------------------
+        // MESSAGE
+        // ---------------------------------------------
 
-});
+        ws.on(
+            "message",
+            (message) => {
+
+                try {
+
+                    const data =
+                        JSON.parse(
+                            message.toString()
+                        );
 
 
-// --------------------------------------------------
+                    console.log(
+                        "RECEIVED:",
+                        data
+                    );
+
+
+                    // =================================
+                    // REGISTER
+                    // =================================
+
+                    if (
+                        data.type === "register"
+                    ) {
+
+                        const deviceType =
+                            data.deviceType;
+
+                        const deviceId =
+                            data.deviceId;
+
+
+                        if (
+                            deviceType !==
+                                "raspberrypi" &&
+                            deviceType !==
+                                "nodemcu"
+                        ) {
+
+                            ws.send(
+                                JSON.stringify({
+                                    type: "error",
+                                    message:
+                                        "Invalid deviceType"
+                                })
+                            );
+
+                            return;
+
+                        }
+
+
+                        if (!deviceId) {
+
+                            ws.send(
+                                JSON.stringify({
+                                    type: "error",
+                                    message:
+                                        "deviceId required"
+                                })
+                            );
+
+                            return;
+
+                        }
+
+
+                        const helmet =
+                            getHelmet(deviceId);
+
+
+                        // --------------------------------
+                        // Remove old connection
+                        // --------------------------------
+
+                        if (
+                            helmet[deviceType] &&
+                            helmet[deviceType] !== ws
+                        ) {
+
+                            try {
+
+                                helmet[
+                                    deviceType
+                                ].terminate();
+
+                            }
+                            catch (e) {}
+
+                        }
+
+
+                        helmet[deviceType] =
+                            ws;
+
+
+                        ws.deviceType =
+                            deviceType;
+
+                        ws.deviceId =
+                            deviceId;
+
+
+                        console.log(
+                            `REGISTERED ${deviceType}: ${deviceId}`
+                        );
+
+
+                        ws.send(
+                            JSON.stringify({
+
+                                type:
+                                    "registered",
+
+                                deviceId:
+                                    deviceId,
+
+                                deviceType:
+                                    deviceType
+
+                            })
+                        );
+
+
+                        return;
+
+                    }
+
+
+                    // =================================
+                    // SENSOR DATA FROM PI
+                    // =================================
+
+                    if (
+                        data.type ===
+                        "sensor_data"
+                    ) {
+
+                        if (
+                            ws.deviceType !==
+                            "raspberrypi"
+                        ) {
+
+                            console.log(
+                                "Rejected sensor data"
+                            );
+
+                            return;
+
+                        }
+
+
+                        const helmetId =
+                            data.deviceId;
+
+
+                        if (
+                            !helmetId
+                        ) {
+
+                            return;
+
+                        }
+
+
+                        const decision =
+                            calculateSafety(
+                                data
+                            );
+
+
+                        console.log(
+                            `DECISION ${helmetId}: ${decision.status}`
+                        );
+
+
+                        // Send to NodeMCU
+
+                        sendMotorCommand(
+                            helmetId,
+                            decision
+                        );
+
+
+                        return;
+
+                    }
+
+
+                    // =================================
+                    // PING
+                    // =================================
+
+                    if (
+                        data.type === "ping"
+                    ) {
+
+                        ws.send(
+                            JSON.stringify({
+
+                                type:
+                                    "pong",
+
+                                time:
+                                    new Date().toISOString()
+
+                            })
+                        );
+
+
+                        return;
+
+                    }
+
+
+                    // =================================
+                    // UNKNOWN
+                    // =================================
+
+                    ws.send(
+                        JSON.stringify({
+
+                            type:
+                                "error",
+
+                            message:
+                                "Unknown message type"
+
+                        })
+                    );
+
+                }
+
+                catch (error) {
+
+                    console.error(
+                        "MESSAGE ERROR:",
+                        error
+                    );
+
+
+                    try {
+
+                        ws.send(
+                            JSON.stringify({
+
+                                type:
+                                    "error",
+
+                                message:
+                                    "Invalid JSON"
+
+                            })
+                        );
+
+                    }
+                    catch (e) {}
+
+                }
+
+            }
+        );
+
+
+        // ---------------------------------------------
+        // CLOSE
+        // ---------------------------------------------
+
+        ws.on(
+            "close",
+            () => {
+
+                console.log(
+                    `DISCONNECTED: ${ws.deviceId || "unknown"}`
+                );
+
+
+                if (
+                    ws.deviceId &&
+                    ws.deviceType
+                ) {
+
+                    const helmet =
+                        helmets.get(
+                            ws.deviceId
+                        );
+
+
+                    if (
+                        helmet &&
+                        helmet[
+                            ws.deviceType
+                        ] === ws
+                    ) {
+
+                        helmet[
+                            ws.deviceType
+                        ] = null;
+
+                    }
+
+                }
+
+            }
+        );
+
+
+        // ---------------------------------------------
+        // ERROR
+        // ---------------------------------------------
+
+        ws.on(
+            "error",
+            (error) => {
+
+                console.error(
+                    "WebSocket error:",
+                    error
+                );
+
+            }
+        );
+
+    }
+);
+
+
+// =====================================================
 // SERVER HEARTBEAT
-// --------------------------------------------------
+// =====================================================
 
-setInterval(() => {
+setInterval(
+    () => {
 
-    wss.clients.forEach((ws) => {
+        wss.clients.forEach(
+            (ws) => {
 
-        if (ws.isAlive === false) {
+                if (
+                    ws.isAlive === false
+                ) {
 
-            console.log("Terminating dead connection");
+                    console.log(
+                        "Removing dead connection"
+                    );
 
-            return ws.terminate();
-        }
+                    ws.terminate();
 
-        ws.isAlive = false;
-        ws.ping();
+                    return;
 
-    });
-
-}, 30000);
+                }
 
 
-// --------------------------------------------------
-// START SERVER
-// --------------------------------------------------
+                ws.isAlive = false;
 
-server.listen(PORT, "0.0.0.0", () => {
+                ws.ping();
 
-    console.log(
-        `Smart Helmet server running on port ${PORT}`
-    );
+            }
+        );
 
-});
+    },
+    30000
+);
+
+
+// =====================================================
+// START
+// =====================================================
+
+server.listen(
+    PORT,
+    "0.0.0.0",
+    () => {
+
+        console.log(
+            `Smart Helmet Server running on port ${PORT}`
+        );
+
+    }
+);
