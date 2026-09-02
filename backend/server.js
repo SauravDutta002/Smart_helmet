@@ -804,6 +804,28 @@ app.get("/health", (req, res) => {
 
 
 // =====================================================
+// GPS
+// =====================================================
+
+app.get("/gps", (req, res) => {
+
+    const lat = Number((30.7680 + (Math.random() - 0.5) * 0.02).toFixed(6));
+    const lng = Number((76.5750 + (Math.random() - 0.5) * 0.02).toFixed(6));
+
+    res.status(200).json({
+        name: "Chandigarh University",
+        location: "Chandigarh University",
+        latitude: lat,
+        longitude: lng,
+        lat: lat,
+        lng: lng,
+        time: new Date().toISOString()
+    });
+
+});
+
+
+// =====================================================
 // SAFETY DECISION
 // =====================================================
 //
