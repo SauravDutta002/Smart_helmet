@@ -803,6 +803,12 @@ app.get("/health", (req, res) => {
 });
 
 
+function getISTTimestamp() {
+    const istOffset = 5.5 * 60 * 60 * 1000;
+    const istDate = new Date(Date.now() + istOffset);
+    return istDate.toISOString().replace("Z", "+05:30");
+}
+
 // =====================================================
 // GPS
 // =====================================================
@@ -819,7 +825,7 @@ app.get("/gps", (req, res) => {
         longitude: lng,
         lat: lat,
         lng: lng,
-        time: new Date().toISOString()
+        time: getISTTimestamp()
     });
 
 });
